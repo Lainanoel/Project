@@ -1,0 +1,324 @@
+#starting with the file uploads
+library(shiny)
+library(shinymeta)
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(lubridate)
+library(colourpicker)
+#ui
+ui <- fluidPage(
+  
+  # App title 
+  titlePanel("Uploading Files"),
+  
+  # Sidebar layout with input and output definitions 
+  sidebarLayout(
+    
+    # Sidebar panel for inputs 
+    sidebarPanel(
+      
+      # Input: Select a file 
+      fileInput("file1", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                           "text/comma-separated-values,text/plain",
+                           ".csv")),
+      
+      # Horizontal line 
+      tags$hr(),
+      
+      # Input: Checkbox if file has header 
+      checkboxInput("header", "Header", TRUE),
+      
+      # Input: Select separator 
+      radioButtons("sep", "Separator",
+                   choices = c(Comma = ",",
+                               Semicolon = ";",
+                               Tab = "\t"),
+                   selected = ","),
+      
+      # Input: Select quotes 
+      radioButtons("quote", "Quote",
+                   choices = c(None = "",
+                               "Double Quote" = '"',
+                               "Single Quote" = "'"),
+                   selected = '"'),
+      
+      # Horizontal line 
+      tags$hr(),
+      
+      # Input: Select number of rows to display 
+      radioButtons("disp", "Display",
+                   choices = c(Head = "head",
+                               All = "all"),
+                   selected = "head"),
+      selectInput("x_var", "Choose X-Axis",
+                  choices = NULL),
+      selectInput("y_var", "Choose Y-Axis",
+                  choices = NULL),
+      #global plot settings
+      tags$hr(),
+      h3("Global Plot Settings"),
+      colourpicker::colourInput(
+        "plot_color",
+        "Plot Color",
+        value = "steelblue"
+      ),
+      sliderInput(
+        "point_size",
+        "Point Size",
+        min = 1, max = 10, 
+        value = 3
+      ),
+      checkboxInput(
+        "trendline",
+        "Show Trendline",
+        value = FALSE
+      ),
+      sliderInput(
+        "bins",
+        "Histogram Bins",
+        min = 5, max = 100,
+        value = 30
+      ),
+      selectInput( #themes
+        "theme",
+        "Theme",
+        choices = c(
+          "Minimal",
+          "Classic",
+          "BW",
+          "Light",
+          "Dark"
+        )
+      ),
+      selectInput( #shape of dots in scatter
+        "point_shape",
+        "Point Shape",
+        choices = c("Circle" = 16,
+                    "Star" = 8,
+                    "Square" = 15,
+                    "Diamond" = 18,
+                    "Triangle" = 17,
+                    "Cross" = 4),
+        selected = 16
+      ),
+      sliderInput("plot_alpha", "Opacity", min = 0, max = 1,
+                  value = 0.7),
+      selectInput("color_var", "Color by (Optional):", choices = NULL) #second category color
+      
+    ),
+ 
+  
+    # Main panel for displaying outputs 
+    mainPanel(
+      tabsetPanel(
+        type = "tabs",
+      # Output: Data file 
+      #initial table
+     tabPanel("Data Preview",
+      helpText("View the raw data structure and column types to ensure accuracy in dataset."),
+      downloadButton("downloadData", "Download CSV"),
+       tableOutput("contents")), 
+      
+      #scatterplot
+     tabPanel("Scatter Plot",
+              wellPanel(
+                h4("Best for Showing: Relationships and Correlations"),
+                p("A scatterplot works best for comparing two numeric variables. It helps identify if one variable is correlated to the other and reveals outliers and clusters in datasets.") ),
+      downloadButton("downloadScatter", "Download Plot as PNG"),
+      plotOutput("myPlot", height = "600px"), #scatterplot output
+      actionButton("showCodePlot", "Show Code for Scatter Plot"), #code button
+      verbatimTextOutput("plotCodeDisplay")),
+      #histogram
+     tabPanel("Histogram",
+              wellPanel(
+                h4("Best for: Distribution and Frequency"),
+                p("Histograms are best for looking at a single numeric variable. They show if the data is normally distributed(bell curve), skewed to one side, or has multiple peaks")
+              ),
+      selectInput("hist_var", "Select Numeric Column", choices = NULL),
+      downloadButton("downloadHist", "Download PNG"),
+      actionButton("showCodeHist", "Show Code for Histogram"),
+      plotOutput("myHist"),
+      verbatimTextOutput("histCodeDisplay")),
+     tabPanel("Box Plot",
+              wellPanel(
+                h4("Best for Multiple Categories of Data"),
+                p("Boxplots are best for visualizing the spread and outliers of numeric varaibles across different categories")
+              ),
+      downloadButton("downloadBox", "Download Plot as PNG"),
+      plotOutput("myBox"),
+      actionButton("showCodeBox", "show code for box plot"),
+      verbatimTextOutput("boxCodeDisplay")),
+      #time trend
+     tabPanel("Time Trend",
+              wellPanel(
+                h4("Best for: Patterns over Time"),
+                p("Time Trends work best with a date/time variable. They help visualize seasonality, long-term growth, or sudden drops across a chronological sequence.")
+              ),
+      downloadButton("downloadTrend", "Download"),
+      plotOutput("timeTrend"),
+      actionButton("showCodeTrend", "Show Code for Time Trend"),
+      verbatimTextOutput("trendCodeDisplay"))
+      
+    )
+    
+  )
+)
+)
+apply_theme <- function(p, theme_choice){
+  switch(theme_choice,
+         "Minimal" = p + theme_minimal(),
+         "Classic" = p + theme_classic(),
+         "BW" = p + theme_bw(),
+         "Light" = p + theme_light(),
+         "Dark" = p + theme_dark(),
+         p + theme_minimal() #default
+         )
+}
+# Define server logic to read selected file 
+server <- function(input, output, session) {
+  
+  # 1. Data Loading
+  userData <- metaReactive({
+    req(input$file1)
+    read.csv(..(input$file1$datapath),
+             header = ..(input$header),
+             sep = ..(input$sep),
+             quote = ..(input$quote))
+  })
+  
+  # Update selectors when data is uploaded
+  observeEvent(userData(), {
+    df <- userData()
+    cols <- names(df)
+    nums <- names(df)[sapply(df, is.numeric)]
+    updateSelectInput(session, "x_var", choices = cols, selected = cols[1])
+    updateSelectInput(session, "y_var", choices = cols, selected = if(length(cols) > 1) cols[2] else cols[1])
+    updateSelectInput(session, "color_var", choices = c("None", cols), selected = "None")
+    updateSelectInput(session, "hist_var", choices = nums)
+  })
+  
+  # creating the scatterplot
+  scatter_obj <- metaReactive({
+    df <- userData()
+    req(df, input$x_var, input$y_var)
+    if(is.character(df[[input$x_var]]) &&
+      any(!is.na(lubridate::parse_date_time(df[[input$x_var]], orders = c("ymd", "mdy", "dmy"))))){
+      df[[input$x_var]] <- as.Date(lubridate::parse_date_time(df[[input$x_var]], orders = c("ymd", "mdy", "dmy")))
+    }
+
+    p <- ggplot(df, aes(x = .data[[input$x_var]], y = .data[[input$y_var]]))
+    
+    if(input$color_var == "None"){
+      p <- p + geom_point(size = ..(input$point_size), color = ..(input$plot_color), shape = ..(as.numeric(input$point_shape)), alpha = ..(input$plot_alpha))
+    } else {
+      p <- p + geom_point(aes(color = .data[[input$color_var]]), size = ..(input$point_size), shape = ..(as.numeric(input$point_shape)), alpha = ..(input$plot_alpha))
+      if(length(unique(df[[input$color_var]])) > 30){
+        p <- p + theme(legend.position = "none")
+      }
+    }
+    
+    p <- p + labs(x = input$x_var, y = input$y_var, color = input$color_var)
+    if(input$trendline) p <- p + geom_smooth(aes(group = 1), method = "lm", color = "blue")
+    apply_theme(p, input$theme)
+  })
+  #output scatterplot
+  output$myPlot <- metaRender(renderPlot, { scatter_obj() })
+  #download scatterplot
+  output$downloadScatter <- downloadHandler(
+    filename = function() { paste0("scatter-", Sys.Date(), ".png") },
+    content = function(file) { ggsave(file, plot = scatter_obj(), device = "png", width = 8, height = 6) }
+  )
+  
+  # creating the histogram
+  hist_obj <- metaReactive({
+    df <- userData()
+    req(df, input$x_var)
+    req(is.numeric(df[[input$hist_var]])) 
+    p <- ggplot(df, aes(x = .data[[input$hist_var]])) + 
+      geom_histogram(fill = ..(input$plot_color), color = "white", bins = ..(input$bins)) +
+      labs(title = paste("Distribution of", input$x_var))
+    apply_theme(p, input$theme)
+  })
+  #output the histogram
+  output$myHist <- metaRender(renderPlot, { hist_obj() })
+  #download histogram
+  output$downloadHist <- downloadHandler(
+    filename = function() { paste0("histogram-", Sys.Date(), ".png") },
+    content = function(file) { ggsave(file, plot = hist_obj(), device = "png") }
+  )
+  box_obj <- metaReactive({
+    df <- userData()
+    req(df, input$x_var, input$y_var)
+    p <- ggplot(df, aes(x = as.factor(.data[[input$x_var]]), y = .data[[input$y_var]])) +
+    geom_boxplot(fill = ..(input$plot_color), alpha = ..(input$plot_alpha)) +
+    labs(x = input$x_var, y = input$y_var)
+  apply_theme(p, input$theme)
+  })
+  #output the boxplot
+  output$myBox <- metaRender(renderPlot, {box_obj() })
+  #download boxplot
+  output$downloadBox <- downloadHandler(
+    filename = function() { paste0("boxplot-", Sys.Date(), ".png")},
+    content = function(file) {ggsave(file, plot = box_obj(), device = "png")}
+  )
+  # creating the time trend
+  processedData <- metaReactive({
+    df <- userData()
+    date_col <- names(df)[sapply(df, function(x){
+      parsed <- lubridate::parse_date_time(x, orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
+      sum(!is.na(parsed)) > 0
+    })][1]
+    req(date_col)
+    df[[date_col]] <- as.Date(lubridate::parse_date_time(df[[date_col]], orders = c("ymd", "mdy", "dmy")))
+    df
+  })
+  
+  trend_obj <- metaReactive({
+    df <- processedData()
+    d_col <- names(df)[sapply(df, function(x) inherits(x, "Date"))][1]
+    n_col <- input$y_var # Using the user-selected Y variable
+    req(d_col, n_col)
+    
+    p <- ggplot(df, aes(x = .data[[d_col]], y = .data[[n_col]])) +
+      geom_line(color = ..(input$plot_color), size = ..(input$point_size)) +
+      labs(title = "Time Trend Analysis", x = d_col, y = n_col)
+    if(input$trendline) p <- p + geom_smooth(method = "lm", linetype = "dashed")
+    apply_theme(p, input$theme)
+  })
+  #output time trend
+  output$timeTrend <- metaRender(renderPlot, { trend_obj() })
+  #download time trend
+  output$downloadTrend <- downloadHandler(
+    filename = function() { paste0("trend-", Sys.Date(), ".png") },
+    content = function(file) { ggsave(file, plot = trend_obj(), device = "png") }
+  )
+  
+  # creating table
+  output$contents <- renderTable({
+    if(input$disp=="head") return(head(userData())) else return(userData())
+  })
+  #download table
+  output$downloadData <- downloadHandler(
+    filename = function() { paste0("data-", Sys.Date(), ".csv") },
+    content = function(file) { write.csv(userData(), file, row.names = FALSE) }
+  )
+  
+  # table code buttons
+  observeEvent(input$showCodePlot, {
+    output$plotCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), scatter_obj()) })
+  })
+  observeEvent(input$showCodeHist, {
+    output$histCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), hist_obj()) })
+  })
+  observeEvent(input$showCodeBox, {
+    output$boxCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), box_obj())})
+  })
+  observeEvent(input$showCodeTrend, {
+    output$trendCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), trend_obj()) })
+  })
+}
+  # Create Shiny app 
+  shinyApp(ui, server)
