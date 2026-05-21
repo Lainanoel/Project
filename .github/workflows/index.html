@@ -15,7 +15,7 @@ library(shinyWidgets)
 options(shiny.maxRequestSize = 50 * 1024^2)
 my_custom_theme <- bs_theme(
   version = 5, 
-  bootswatch = "minty",
+  bootswatch = "lux",
   bg = "#ffffff",
   fg = "black",
   primary = "#0021A5",
@@ -175,15 +175,29 @@ ui <- fluidPage(
                 h4("Data Overview", style = "color: #0021A5; margin-top:0; font-weight:bold;"),
                 p("This section shows summary statistics")
               ),
-              verbatimTextOutput("summary_stats")
+              wellPanel(
+                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius:4px; margin-bottom:15px; margin-top: 10px;",
+                h4("Data Summary and Model Estimates", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
+                p("Review the descriptive variables next to the standard ordinary least squares (OLS) baseline regression estimates. ", style = "margin-bottom:0; color: #333333;")
+              ), 
+              fluidRow(
+                column(width = 6, 
+                       h5("Descriptive Statistics", style = "color: #0021A5; font-weight: bold; margin-bottom: 15px;"),
+                       div(style = "overflow-x: auto;",tableOutput("summaryStats"))
+                      ),
+                column(width = 6,
+                       h5("Baseline OLS Regression Coefficients", style = "color: #0021A5; font-weight: bold; margin-bottom: 15px;"),
+                       div(style = "overflow-x: auto;", tableOutput("regressionTable"))
+                )
+              ),
      ),
       
       #scatterplot
-     tabPanel("Scatter Plot",
+     tabPanel(" Interactive Scatter Plot",
               wellPanel(
                 style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top: 10px",
-                h4("Best for Showing: Relationships and Correlations", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("A scatterplot works best for comparing two numeric variables. It helps identify if one variable is correlated to the other and reveals outliers and clusters in datasets. If you have a large dataset, this becomes a hexbin to avoid crashing from plotting so many individual points. Uncheck large dataset mode to return to scatterplot.", style = "margin-bottom: 0; color: #333333;")
+                h4("Best for: Showing Relationships and Correlations", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
+                p("A scatterplot works best for comparing two numeric variables. It helps identify if one variable is correlated to the other and reveals outliers and clusters in datasets. If you have a large dataset, please use the hexbin to avoid crashing from plotting so many individual interactive points. Uncheck large dataset mode to return to scatterplot. See next tab for a static scatterplot.", style = "margin-bottom: 0; color: #333333;")
                 ),
       downloadButton("downloadScatter", "Download Plot as PNG"),
       shinycssloaders::withSpinner(plotlyOutput("myPlot", height = "600px"), type = 4, color = "#FA4616"),
@@ -207,7 +221,7 @@ ui <- fluidPage(
               wellPanel(
                 style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top:10px",
                 h4("Best for: Distribution and Frequency", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("Histograms are best for looking at a single numeric variable. They show if the data is normally distributed(bell curve), skewed to one side, or has multiple peaks")
+                p("Histograms are Best for: looking at a single numeric variable. They show if the data is normally distributed(bell curve), skewed to one side, or has multiple peaks")
               ),
       selectInput("hist_var", "Select Numeric Column", choices = NULL),
       downloadButton("downloadHist", "Download PNG"),
@@ -217,7 +231,7 @@ ui <- fluidPage(
      tabPanel("Box Plot",
               wellPanel(
                 style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top:10px",
-                h4("Best for Multiple Categories of Data", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
+                h4("Best for: Multiple Categories of Data", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
                 p("Boxplots are best for visualizing the spread and outliers of numeric varaibles across different categories")
               ),
       downloadButton("downloadBox", "Download Plot as PNG"),
@@ -304,10 +318,47 @@ server <- function(input, output, session) {
     updateSelectInput(session, "hist_var", choices = nums)
   })
   #summary stats
-  output$summary_stats <- renderPrint({
+  output$summaryStats <- renderTable({
     req(userData())
-    summary(userData())
-  })
+    df <- cleanedData()
+    req(input$x_var)
+    validate(need(is.numeric(df[[input$x_var]]), "Select a numeric column for summary stats."))
+    s <- summary(df[[input$x_var]])
+    stats_df <- data.frame(
+      Statistic = names(s),
+      Value = as.character(unname(s))
+    )
+    return(stats_df)
+  }, striped = TRUE, hover = TRUE, width = "100%", digits = 4)
+  #regression table
+  output$regressionTable <- renderTable({
+    req(userData())
+    df <- cleanedData()
+    req(input$x_var, input$y_var)
+    validate(
+      need(is.numeric(df[[input$x_var]]), "X-Axis must be a numeric column to peform a linear regression."),
+      need(is.numeric(df[[input$y_var]]), "Y-Axis must be a numeric column to perform a linear regression."),
+    )
+    formula_obj <- as.formula(paste0("`", input$y_var, "`~`", input$x_var, "`"))
+    fit <- lm(formula_obj, data = df)
+    fit_summary <- summary(fit)$coefficients
+    
+    coef_output <- data.frame(
+      Term = rownames(fit_summary),
+      Estimate = fit_summary[, "Estimate"],
+      `Std. Error` = fit_summary[, "Std. Error"],
+      `t-value` = fit_summary[, "t value"],
+      `p-value` = fit_summary[, "Pr(>|t|)"],
+      check.names = FALSE
+    )
+    coef_output$Term <- ifelse(
+      coef_output$Term == "(Intercept)",
+      "Intercept (a)",
+      paste0("Slope (β) of ", input$x_var)
+    )
+    return(coef_output)
+  }, digits = 4, striped = TRUE, hover = TRUE, width = "100%")
+  
   output$na_warning <- renderUI({
     req(userData(), cleanedData())
     orig_count <- nrow(userData())
@@ -375,7 +426,7 @@ server <- function(input, output, session) {
     #assigning colors
     show_color_legend <- input$color_var != "None" && !input$use_hex && length(unique(df[[input$color_var]])) <= 30
     color_label <- if(show_color_legend) input$color_var else NULL
-    p <- p + labs(title = paste("Scatterplot of", input$x_var, "vs", input$yvar),
+    p <- p + labs(title = paste("Scatterplot of", input$x_var, "vs", input$y_var),
                   x = input$x_var,
                   y = input$y_var,
                   color = color_label)
@@ -421,6 +472,11 @@ server <- function(input, output, session) {
                           color = ..(input$plot_color),
                           shape = ..(as.numeric(input$point_shape)),
                           alpha = ..(input$plot_alpha))
+    } else {
+      p <- p + geom_point(aes(color = .data[[input$color_var]]),
+                          size = input$point_size,
+                          shape = as.numeric(input$point_shape),
+                          alpha = input$plot_alpha)
     }
     show_color_legend <- input$color_var != "None" && num_colors <=30
     color_label <- if(show_color_legend) input$color_var else NULL
@@ -439,7 +495,7 @@ server <- function(input, output, session) {
   #download static scatter
   output$downloadStaticScatter <- downloadHandler(
     filename = function(){ paste0("static-scatter-", Sys.Date(), ".png")},
-    content = function(){ggsave(file, plot = static_scatter_obj(), device = "png", width = 8, height = 6)}
+    content = function(file){ggsave(file, plot = static_scatter_obj(), device = "png", width = 8, height = 6)}
   )
   # creating the histogram
   hist_obj <- metaReactive({
