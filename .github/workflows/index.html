@@ -1,4 +1,4 @@
-#starting with the file uploads
+
 library(shiny)
 library(shinymeta)
 library(tidyverse)
@@ -11,640 +11,606 @@ library(hexbin)
 library(bslib)
 library(shinycssloaders)
 library(shinyWidgets)
-# Increase upload limit to 50MB
+
 options(shiny.maxRequestSize = 50 * 1024^2)
+
+# ---- Theme -----------------------------------------------
 my_custom_theme <- bs_theme(
-  version = 5, 
-  bootswatch = "lux",
-  bg = "#ffffff",
-  fg = "black",
-  primary = "#0021A5",
-  secondary = "#FA4616",
-  base_font = font_google("Open Sans"),
-  heading_font = font_google("Montserrat"),
-  code_font = font_google("Fira Code")
-  
+  version       = 5,
+  bootswatch    = "lux",
+  bg            = "#ffffff",
+  fg            = "black",
+  primary       = "#0021A5",
+  secondary     = "#FA4616",
+  base_font     = font_google("Open Sans"),
+  heading_font  = font_google("Montserrat"),
+  code_font     = font_google("Fira Code")
 )
-#ui
+
+ifas_blue   <- "#0021A5"
+ifas_orange <- "#FA4616"
+
+theme_ifas <- function() {
+  theme_minimal(base_size = 12) %+replace%
+    theme(
+      plot.title        = element_text(face = "bold", size = 16, color = ifas_orange,
+                                       hjust = 0, margin = margin(b = 10)),
+      axis.title        = element_text(face = "bold", color = ifas_orange),
+      panel.grid.minor  = element_blank(),
+      panel.grid.major  = element_line(color = "#e7e7e7", linewidth = .5),
+      legend.position   = "bottom",
+      legend.title      = element_text(face = "bold"),
+      plot.background   = element_rect(fill = "white", color = NA),
+      panel.background  = element_rect(fill = "white", color = NA)
+    )
+}
+
+apply_theme <- function(p, theme_choice) {
+  switch(theme_choice,
+         "IFAS Theme" = p + theme_ifas(),
+         "Minimal"    = p + theme_minimal(),
+         "Classic"    = p + theme_classic(),
+         "BW"         = p + theme_bw(),
+         "Light"      = p + theme_light(),
+         "Dark"       = p + theme_dark(),
+         p + theme_minimal()
+  )
+}
+
+# ---- Shared helper: parse date column --------------------
+try_parse_dates <- function(df) {
+  is_date_col <- sapply(df, function(x) {
+    if (inherits(x, c("Date", "POSIXt"))) return(TRUE)
+    if (is.numeric(x) || is.logical(x) || all(is.na(x))) return(FALSE)
+    sample_val  <- as.character(head(x[!is.na(x)], 20))
+    if (length(sample_val) == 0) return(FALSE)
+    test_parse  <- suppressWarnings(
+      lubridate::parse_date_time(sample_val, orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
+    )
+    sum(!is.na(test_parse)) > 0
+  })
+  date_col <- names(df)[is_date_col][1]
+  if (!is.na(date_col)) {
+    df[[date_col]] <- as.Date(suppressWarnings(
+      lubridate::parse_date_time(df[[date_col]], orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
+    ))
+  }
+  df
+}
+
+# ---- Helper: parse a single character x-axis column -----
+maybe_parse_x <- function(df, x_col) {
+  if (is.character(df[[x_col]])) {
+    test_val    <- head(df[[x_col]], 20)
+    parsed_test <- suppressWarnings(
+      lubridate::parse_date_time(test_val, orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
+    )
+    if (any(!is.na(parsed_test))) {
+      df[[x_col]] <- as.Date(suppressWarnings(
+        lubridate::parse_date_time(df[[x_col]], orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
+      ))
+    }
+  }
+  df
+}
+
+# ---- Shared well-panel header ---------------------------
+info_panel <- function(title, body) {
+  wellPanel(
+    style = paste0(
+      "background-color:#ddefff;border-left:5px solid #0021A5;",
+      "border-right:none;border-top:none;border-bottom:none;",
+      "border-radius:4px;margin-bottom:15px;margin-top:10px;"
+    ),
+    h4(title, style = "color:#0021A5;margin-top:0;font-weight:bold;"),
+    p(body, style = "margin-bottom:0;color:#333333;")
+  )
+}
+
+# ============================================================
+# UI
+# ============================================================
 ui <- fluidPage(
-  #page theme
   theme = my_custom_theme,
-  # App title 
-  titlePanel("Uploading Files"),
+  titlePanel("Data Explorer"),
   
-  # Sidebar layout with input and output definitions 
   sidebarLayout(
     
-    # Sidebar panel for inputs 
+    # ---- Sidebar ------------------------------------------
     sidebarPanel(
-      style = "background-color: #ddefff; border-color: #black;",
-      #Input: Select a file 
+      style = "background-color:#ddefff;",
+      
       fileInput("file1", "Choose CSV File",
                 multiple = FALSE,
-                accept = c("text/csv",
-                           "text/comma-separated-values,text/plain",
-                           ".csv")),
+                accept   = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
+      
       tags$hr(),
       h3("Data Processing"),
       
       checkboxInput("remove_na", "Exclude Rows with Missing Data", value = TRUE),
       checkboxInput("log_scale", "Use Logarithmic Scale (Y-axis)", value = FALSE),
+      
       shinyWidgets::switchInput(
-        inputId = "trendline",
-        label = "Trendline",
-        value = FALSE,
-        onLabel = "ON",
+        inputId  = "trendline",
+        label    = "Trendline",
+        value    = FALSE,
+        onLabel  = "ON",
         offLabel = "OFF",
         onStatus = "primary"
       ),
-      checkboxInput("use_hex", "Large Dataset Mode (Check if you have a large dataset!!)", value = TRUE),
-      conditionalPanel(
-        condition = "input.use_hex==true",
-        sliderInput("hex_bins", "Hexbin Resolution", min = 10, max = 100,
-                    value = 30)
-      ),
-      # Horizontal line 
-      tags$hr(),
       
-      # Input: Checkbox if file has header 
+      checkboxInput("use_hex", "Large Dataset Mode (hexbin)", value = FALSE),
+      conditionalPanel(
+        condition = "input.use_hex == true",
+        sliderInput("hex_bins", "Hexbin Resolution", min = 10, max = 100, value = 30)
+      ),
+      
+      tags$hr(),
       checkboxInput("header", "Header", TRUE),
       
-      # Input: Select separator 
       radioButtons("sep", "Separator",
-                   choices = c(Comma = ",",
-                               Semicolon = ";",
-                               Tab = "\t"),
+                   choices  = c(Comma = ",", Semicolon = ";", Tab = "\t"),
                    selected = ","),
       
-      # Input: Select quotes 
       radioButtons("quote", "Quote",
-                   choices = c(None = "",
-                               "Double Quote" = '"',
-                               "Single Quote" = "'"),
+                   choices  = c(None = "", "Double Quote" = '"', "Single Quote" = "'"),
                    selected = '"'),
       
-      # Horizontal line 
       tags$hr(),
-      
-      # Input: Select number of rows to display 
-      radioButtons("disp", "Display",
-                   choices = c(Head = "head",
-                               All = "all"),
+      radioButtons("disp", "Preview Rows",
+                   choices  = c(Head = "head", All = "all"),
                    selected = "head"),
-      selectInput("x_var", "Choose X-Axis",
-                  choices = NULL),
-      selectInput("y_var", "Choose Y-Axis",
-                  choices = NULL),
-      #global plot settings
+      
+      selectInput("x_var",     "X-Axis",           choices = NULL),
+      selectInput("y_var",     "Y-Axis",           choices = NULL),
+      
       tags$hr(),
       h3("Global Plot Settings"),
-      colourpicker::colourInput(
-        "plot_color",
-        "Plot Color",
-        value = "#0021A5"
-      ),
-      sliderInput(
-        "point_size",
-        "Point Size",
-        min = 1, max = 10, 
-        value = 3
-      ),
-      sliderInput(
-        "bins",
-        "Histogram Bins",
-        min = 5, max = 100,
-        value = 30
-      ),
-      selectInput( #themes
-        "theme",
-        "Theme",
-        choices = c(
-          "IFAS Theme",
-          "Minimal",
-          "Classic",
-          "BW",
-          "Light",
-          "Dark"
-        )
-      ),
       
-      selectInput( #shape of dots in scatter
-        "point_shape",
-        "Point Shape",
-        choices = c("Circle" = 16,
-                    "Star" = 8,
-                    "Square" = 15,
-                    "Diamond" = 18,
-                    "Triangle" = 17,
-                    "Cross" = 4),
-        selected = 16
-      ),
-      sliderInput("plot_alpha", "Opacity", min = 0, max = 1,
-                  value = 0.7),
+      colourpicker::colourInput("plot_color", "Plot Color", value = "#0021A5"),
+      
+      sliderInput("point_size", "Point Size",     min = 1,  max = 10,  value = 3),
+      sliderInput("bins",       "Histogram Bins", min = 5,  max = 100, value = 30),
+      sliderInput("plot_alpha", "Opacity",        min = 0,  max = 1,   value = 0.7, step = 0.05),
+      
+      selectInput("theme", "Theme",
+                  choices = c("IFAS Theme", "Minimal", "Classic", "BW", "Light", "Dark")),
+      
+      selectInput("point_shape", "Point Shape",
+                  choices  = c(Circle = 16, Star = 8, Square = 15,
+                               Diamond = 18, Triangle = 17, Cross = 4),
+                  selected = 16),
+      
       selectInput("color_var", "Color by (Optional):", choices = NULL),
-      #second category color
+      
       tags$hr(),
       uiOutput("na_warning")
     ),
- 
-  
-    # Main panel for displaying outputs 
+    
+    # ---- Main panel ---------------------------------------
     mainPanel(
       card(
-        full_screen = TRUE, 
-        style = "border: 1px solid #e2e9f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5); margin-top:15px;",
-      # Output: Data file 
-      #initial table
-      tabsetPanel(
-        type = "tabs",
-     tabPanel("Data Preview",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-top: none; border-bottom: none; border-radius:4px; margin-bottom: 15px; margin-top: 10px;",
-                h4("Data Structure Verification", style = "color: #0021A5; margin-top:0;font-weight: bold;"),
-                p("View the raw data structure and column types below to ensure accuracy before running statistical modeling.", style = "margin-bottom: 0; color: #333333;")
-              ),
-              div(style = "margin-bottom: 15px;",
-                  downloadButton("downloadData", "Download CSV", class = "btn-secondary")
-                  ),
-              tableOutput("contents")
-              ),
-     #summary stats
-     tabPanel("Data Summary",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top: 10px;",
-                h4("Data Overview", style = "color: #0021A5; margin-top:0; font-weight:bold;"),
-                p("This section shows summary statistics")
-              ),
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius:4px; margin-bottom:15px; margin-top: 10px;",
-                h4("Data Summary and Model Estimates", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("Review the descriptive variables next to the standard ordinary least squares (OLS) baseline regression estimates. ", style = "margin-bottom:0; color: #333333;")
-              ), 
-              fluidRow(
-                column(width = 6, 
-                       h5("Descriptive Statistics", style = "color: #0021A5; font-weight: bold; margin-bottom: 15px;"),
-                       div(style = "overflow-x: auto;",tableOutput("summaryStats"))
-                      ),
-                column(width = 6,
-                       h5("Baseline OLS Regression Coefficients", style = "color: #0021A5; font-weight: bold; margin-bottom: 15px;"),
-                       div(style = "overflow-x: auto;", tableOutput("regressionTable"))
-                )
-              ),
-     ),
-      
-      #scatterplot
-     tabPanel(" Interactive Scatter Plot",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top: 10px",
-                h4("Best for: Showing Relationships and Correlations", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("A scatterplot works best for comparing two numeric variables. It helps identify if one variable is correlated to the other and reveals outliers and clusters in datasets. If you have a large dataset, please use the hexbin to avoid crashing from plotting so many individual interactive points. Uncheck large dataset mode to return to scatterplot. See next tab for a static scatterplot.", style = "margin-bottom: 0; color: #333333;")
-                ),
-      downloadButton("downloadScatter", "Download Plot as PNG"),
-      shinycssloaders::withSpinner(plotlyOutput("myPlot", height = "600px"), type = 4, color = "#FA4616"),
-      actionButton("showCodePlot", "Show Code for Scatter Plot"
-      ),#code button
-      verbatimTextOutput("plotCodeDisplay")),
-     #Static Scatterplot for large data sets
-     tabPanel("Static Scatter Plot",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top: 10px",
-                h4("Best for: Large Data Sets", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("This plot displays a static scatter plot."),
-              ),
-                downloadButton("downloadStaticScatter", "Download Static Plot as a PNG"),
-                plotOutput("myStaticPlot", height = "600px"),
-                actionButton("showCodeStaticPlot", "Show Code for Static Scatterplot"),
-                verbatimTextOutput("staticPlotCodeDisplay")
-              ),
-      #histogram
-     tabPanel("Histogram",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top:10px",
-                h4("Best for: Distribution and Frequency", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("Histograms are Best for: looking at a single numeric variable. They show if the data is normally distributed(bell curve), skewed to one side, or has multiple peaks")
-              ),
-      selectInput("hist_var", "Select Numeric Column", choices = NULL),
-      downloadButton("downloadHist", "Download PNG"),
-      actionButton("showCodeHist", "Show Code for Histogram"),
-      plotlyOutput("myHist"),
-      verbatimTextOutput("histCodeDisplay")),
-     tabPanel("Box Plot",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top:10px",
-                h4("Best for: Multiple Categories of Data", style = "color:#0021A5; margin-top:0; font-weight:bold;"),
-                p("Boxplots are best for visualizing the spread and outliers of numeric varaibles across different categories")
-              ),
-      downloadButton("downloadBox", "Download Plot as PNG"),
-      plotlyOutput("myBox"),
-      actionButton("showCodeBox", "show code for box plot"),
-      verbatimTextOutput("boxCodeDisplay")),
-      #time trend
-     tabPanel("Time Trend",
-              wellPanel(
-                style = "background-color: #ddefff; border-left: 5px solid #0021A5; border-right: none; border-bottom:none; border-radius: 4px; margin-bottom:15px; margin-top:10px",
-                h4("Best for: Patterns over Time", style = "color:#0021A5; margin-top:0; font-weight: bold;"),
-                p("Time Trends work best with a date/time variable. They help visualize seasonality, long-term growth, or sudden drops across a chronological sequence.")
-              ),
-      downloadButton("downloadTrend", "Download"),
-      plotlyOutput("timeTrend"),
-      actionButton("showCodeTrend", "Show Code for Time Trend"),
-      verbatimTextOutput("trendCodeDisplay"))
-      
+        full_screen = TRUE,
+        style = paste0(
+          "border:1px solid #e2e9f0;",
+          "box-shadow:0 4px 6px -1px rgba(0,0,0,0.5);",
+          "margin-top:15px;"
+        ),
+        
+        tabsetPanel(
+          type = "tabs",
+          
+          # ---- Data Preview ----
+          tabPanel("Data Preview",
+                   info_panel(
+                     "Data Structure Verification",
+                     "View the raw data structure and column types to verify accuracy before analysis."
+                   ),
+                   div(style = "margin-bottom:15px;",
+                       downloadButton("downloadData", "Download CSV", class = "btn-secondary")),
+                   tableOutput("contents")
+          ),
+          
+          # ---- Data Summary ----
+          tabPanel("Data Summary",
+                   info_panel("Data Overview",
+                              "Summary statistics and OLS regression estimates for the selected X/Y variables."),
+                   fluidRow(
+                     column(6,
+                            h5("Descriptive Statistics",
+                               style = "color:#0021A5;font-weight:bold;margin-bottom:15px;"),
+                            div(style = "overflow-x:auto;", tableOutput("summaryStats"))
+                     ),
+                     column(6,
+                            h5("Baseline OLS Regression Coefficients",
+                               style = "color:#0021A5;font-weight:bold;margin-bottom:15px;"),
+                            div(style = "overflow-x:auto;", tableOutput("regressionTable"))
+                     )
+                   )
+          ),
+          
+          # ---- Interactive Scatter ----
+          tabPanel("Interactive Scatter Plot",
+                   info_panel(
+                     "Best for: Relationships and Correlations",
+                     paste("Compares two numeric variables to reveal correlations, outliers, and clusters.",
+                           "Enable 'Large Dataset Mode' in the sidebar to switch to hexbin density rendering",
+                           "for very large files. For a static (downloadable) version see the next tab.")
+                   ),
+                   downloadButton("downloadScatter", "Download Plot as PNG"),
+                   shinycssloaders::withSpinner(
+                     plotlyOutput("myPlot", height = "600px"),
+                     type = 4, color = "#FA4616"
+                   ),
+                   actionButton("showCodePlot", "Show R Code"),
+                   verbatimTextOutput("plotCodeDisplay")
+          ),
+          
+          # ---- Static Scatter ----
+          tabPanel("Static Scatter Plot",
+                   info_panel(
+                     "Best for: Large Data Sets",
+                     "Static (non-interactive) scatter plot — renders faster and is easier to download."
+                   ),
+                   downloadButton("downloadStaticScatter", "Download as PNG"),
+                   plotOutput("myStaticPlot", height = "600px"),
+                   actionButton("showCodeStaticPlot", "Show R Code"),
+                   verbatimTextOutput("staticPlotCodeDisplay")
+          ),
+          
+          # ---- Histogram ----
+          tabPanel("Histogram",
+                   info_panel(
+                     "Best for: Distribution and Frequency",
+                     paste("Shows the shape of a single numeric variable —",
+                           "normal distribution, skew, and multiple peaks.")
+                   ),
+                   selectInput("hist_var", "Select Numeric Column", choices = NULL),
+                   downloadButton("downloadHist", "Download PNG"),
+                   shinycssloaders::withSpinner(
+                     plotlyOutput("myHist"),
+                     type = 4, color = "#FA4616"
+                   ),
+                   actionButton("showCodeHist", "Show R Code"),
+                   verbatimTextOutput("histCodeDisplay")
+          ),
+          
+          # ---- Box Plot ----
+          tabPanel("Box Plot",
+                   info_panel(
+                     "Best for: Multiple Categories of Data",
+                     "Visualizes the spread and outliers of a numeric variable across different categories."
+                   ),
+                   downloadButton("downloadBox", "Download Plot as PNG"),
+                   shinycssloaders::withSpinner(
+                     plotlyOutput("myBox"),
+                     type = 4, color = "#FA4616"
+                   ),
+                   actionButton("showCodeBox", "Show R Code"),
+                   verbatimTextOutput("boxCodeDisplay")
+          ),
+          
+          # ---- Time Trend ----
+          tabPanel("Time Trend",
+                   info_panel(
+                     "Best for: Patterns over Time",
+                     paste("Requires a date/time column. Reveals seasonality,",
+                           "long-term growth, or sudden drops across a chronological sequence.")
+                   ),
+                   downloadButton("downloadTrend", "Download PNG"),
+                   shinycssloaders::withSpinner(
+                     plotlyOutput("timeTrend"),
+                     type = 4, color = "#FA4616"
+                   ),
+                   actionButton("showCodeTrend", "Show R Code"),
+                   verbatimTextOutput("trendCodeDisplay")
+          )
+        )
+      )
     )
-    
   )
 )
-))
-ifas_blue <- "#0021A5"
-ifas_orange <- "#FA4616"
-theme_ifas <- function() {
-  theme_minimal(base_size = 12) %+replace%
-  theme(
-    plot.title = element_text(face = "bold", size = 16, color = ifas_orange, hjust = 0, margin = margin(b = 10)),
-    axis.title = element_text(face = "bold", color = ifas_orange),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(color = "#e7e7e7", linewidth = .5),
-    legend.position = "bottom",
-    legend.title = element_text(face = "bold"),
-    plot.background = element_rect(fill = "white", color = NA),
-    panel.background = element_rect(fill = "white", color = NA)
-  )
-}
-apply_theme <- function(p, theme_choice){
-  switch(theme_choice,
-         "IFAS Theme" = p + theme_ifas(),
-         "Minimal" = p + theme_minimal(),
-         "Classic" = p + theme_classic(),
-         "BW" = p + theme_bw(),
-         "Light" = p + theme_light(),
-         "Dark" = p + theme_dark(),
-         p + theme_minimal() #default
-         )
-}
 
-# Define server logic to read selected file 
+# ============================================================
+# Server
+# ============================================================
 server <- function(input, output, session) {
+  
+  # ---- 1. Raw data load (memoised) ----------------------
+  userData <- metaReactive({
+    req(input$file1)
+    read.csv(
+      ..(input$file1$datapath),
+      header = ..(input$header),
+      sep    = ..(input$sep),
+      quote  = ..(input$quote)
+    )
+  })
+  
+  # ---- 2. Cleaned data (remove NA on selected cols) -----
   cleanedData <- reactive({
-    df <-userData()
+    df <- userData()
     req(df)
-    if(input$remove_na){
-      current_vars <- c(input$x_var, input$y_var, input$hist_var)
-      valid_vars <- intersect(current_vars, names(df))
-      if(length(valid_vars) >0){
-        df <- df%>%
-          filter(if_all(all_of(valid_vars), ~ !is.na(.)))
+    if (input$remove_na) {
+      valid_vars <- intersect(
+        c(input$x_var, input$y_var, input$hist_var),
+        names(df)
+      )
+      if (length(valid_vars) > 0) {
+        df <- df %>% filter(if_all(all_of(valid_vars), ~ !is.na(.)))
       }
-        
+    }
+    if (input$log_scale) {
+      y <- input$y_var
+      if (!is.null(y) && y %in% names(df) && is.numeric(df[[y]])) {
+        df[[y]] <- suppressWarnings(log(df[[y]]))
+        df      <- df[is.finite(df[[y]]), ]
+      }
     }
     df
   })
-  # 1. Data Loading
-  userData <- metaReactive({
-    req(input$file1)
-    read.csv(..(input$file1$datapath),
-             header = ..(input$header),
-             sep = ..(input$sep),
-             quote = ..(input$quote))
-  })
   
-  # Update selectors when data is uploaded
+  # ---- 3. Update selectors on upload --------------------
   observeEvent(userData(), {
-    df <- userData()
+    df   <- userData()
     cols <- names(df)
     nums <- names(df)[sapply(df, is.numeric)]
-    updateSelectInput(session, "x_var", choices = cols, selected = cols[1])
-    updateSelectInput(session, "y_var", choices = cols, selected = if(length(cols) > 1) cols[2] else cols[1])
+    updateSelectInput(session, "x_var",     choices = cols,           selected = cols[1])
+    updateSelectInput(session, "y_var",     choices = cols,           selected = if (length(cols) > 1) cols[2] else cols[1])
     updateSelectInput(session, "color_var", choices = c("None", cols), selected = "None")
-    updateSelectInput(session, "hist_var", choices = nums)
+    updateSelectInput(session, "hist_var",  choices = nums)
   })
-  #summary stats
+  
+  # ---- 4. NA warning banner -----------------------------
+  output$na_warning <- renderUI({
+    req(userData(), cleanedData())
+    removed <- nrow(userData()) - nrow(cleanedData())
+    if (input$remove_na && removed > 0) {
+      wellPanel(
+        style = "background-color:#fff3cd;border-color:#ffeeba;color:#856404;",
+        tags$b("Data Health Note: "),
+        paste0(removed, " rows with missing values were removed.")
+      )
+    }
+  })
+  
+  # ---- 5. Data Preview table ----------------------------
+  output$contents <- renderTable({
+    df <- userData()
+    req(df)
+    if (input$disp == "head") head(df) else head(df, 100)
+  })
+  
+  output$downloadData <- downloadHandler(
+    filename = function() paste0("data-", Sys.Date(), ".csv"),
+    content  = function(file) write.csv(userData(), file, row.names = FALSE)
+  )
+  
+  # ---- 6. Summary stats ---------------------------------
   output$summaryStats <- renderTable({
-    req(userData())
     df <- cleanedData()
-    req(input$x_var)
-    validate(need(is.numeric(df[[input$x_var]]), "Select a numeric column for summary stats."))
+    req(input$x_var, input$x_var %in% names(df))
+    validate(need(is.numeric(df[[input$x_var]]),
+                  "Select a numeric column for summary stats."))
     s <- summary(df[[input$x_var]])
-    stats_df <- data.frame(
-      Statistic = names(s),
-      Value = as.character(unname(s))
-    )
-    return(stats_df)
+    data.frame(Statistic = names(s), Value = as.character(unname(s)))
   }, striped = TRUE, hover = TRUE, width = "100%", digits = 4)
-  #regression table
+  
+  # ---- 7. OLS regression table --------------------------
   output$regressionTable <- renderTable({
-    req(userData())
     df <- cleanedData()
     req(input$x_var, input$y_var)
     validate(
-      need(is.numeric(df[[input$x_var]]), "X-Axis must be a numeric column to peform a linear regression."),
-      need(is.numeric(df[[input$y_var]]), "Y-Axis must be a numeric column to perform a linear regression."),
+      need(is.numeric(df[[input$x_var]]),
+           "X-Axis must be numeric for linear regression."),
+      need(is.numeric(df[[input$y_var]]),
+           "Y-Axis must be numeric for linear regression.")
     )
-    formula_obj <- as.formula(paste0("`", input$y_var, "`~`", input$x_var, "`"))
-    fit <- lm(formula_obj, data = df)
-    fit_summary <- summary(fit)$coefficients
-    
-    coef_output <- data.frame(
-      Term = rownames(fit_summary),
-      Estimate = fit_summary[, "Estimate"],
-      `Std. Error` = fit_summary[, "Std. Error"],
-      `t-value` = fit_summary[, "t value"],
-      `p-value` = fit_summary[, "Pr(>|t|)"],
-      check.names = FALSE
+    formula_obj <- as.formula(paste0("`", input$y_var, "` ~ `", input$x_var, "`"))
+    fit         <- lm(formula_obj, data = df)
+    fs          <- summary(fit)$coefficients
+    coef_out    <- data.frame(
+      Term          = ifelse(rownames(fs) == "(Intercept)",
+                             "Intercept (a)",
+                             paste0("Slope (\u03b2) of ", input$x_var)),
+      Estimate      = fs[, "Estimate"],
+      `Std. Error`  = fs[, "Std. Error"],
+      `t-value`     = fs[, "t value"],
+      `p-value`     = fs[, "Pr(>|t|)"],
+      check.names   = FALSE
     )
-    coef_output$Term <- ifelse(
-      coef_output$Term == "(Intercept)",
-      "Intercept (a)",
-      paste0("Slope (β) of ", input$x_var)
-    )
-    return(coef_output)
+    coef_out
   }, digits = 4, striped = TRUE, hover = TRUE, width = "100%")
   
-  output$na_warning <- renderUI({
-    req(userData(), cleanedData())
-    orig_count <- nrow(userData())
-    clean_count <- nrow(cleanedData())
-    removed <- orig_count - clean_count
-    if(input$remove_na && removed >0){
-      wellPanel(
-        style = "background-color: #fff3cd; border-color: #ffeeba; color: #856404;",
-        tags$b("Data Health Note: "),
-        paste0(removed, " rows containing missing values were removed from this dataset")
-      )
-    } else{
-      return(NULL)
-    }
-  })
-  # creating the scatterplot
+  # ---- 8. Interactive scatter ----------------------------
   scatter_obj <- metaReactive({
     df <- cleanedData()
     req(df, input$x_var, input$y_var)
     validate(
       need(is.numeric(df[[input$x_var]]) || inherits(df[[input$x_var]], "Date"),
-           "Please select a Numeric or Date column for the X Axis."),
-      need(is.numeric(df[[input$y_var]]),
-           "Please select a Numeric Column for the Y-Axis.")
+           "X-Axis must be numeric or a date."),
+      need(is.numeric(df[[input$y_var]]), "Y-Axis must be numeric.")
     )
-    #if not using hexbin, max of 5000 data points
-    if(!input$use_hex && nrow(df)> 5000){
+    df <- maybe_parse_x(df, ..(input$x_var))
+    
+    # Sample if needed (non-hex only)
+    if (!..(input$use_hex) && nrow(df) > 5000) {
       set.seed(123)
-      df <- df[sample(nrow(df), 5000),]
-      
+      df <- df[sample(nrow(df), 5000), ]
     }
-    #date parsing to stop crashing
-    if(is.character(df[[input$x_var]])){
-      test_val <- head(df[[input$x_var]], 20)
-      parsed_test <- suppressWarnings(
-        lubridate:: parse_date_time(test_val, orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
-      )
-      if(any(!is.na(parsed_test))){
-        df[[input$x_var]] <- as.Date(suppressWarnings(
-          lubridate::parse_date_time(df[[input$x_var]], orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
-        ))
-      }
-    }
-    num_colors <- if(!is.null(input$color_var) && input$color_var != "None") length(unique(df[[input$color_var]])) else 0
-    p <- ggplot(df, aes(x = .data[[input$x_var]], y = .data[[input$y_var]]))
-    #hex
-    if(input$use_hex) {
+    
+    num_colors <- if (!is.null(..(input$color_var)) && ..(input$color_var) != "None")
+      length(unique(df[[..(input$color_var)]])) else 0
+    
+    p <- ggplot(df, aes(x = .data[[..(input$x_var)]], y = .data[[..(input$y_var)]]))
+    
+    if (..(input$use_hex)) {
       p <- p + geom_hex(bins = ..(input$hex_bins)) + scale_fill_viridis_c()
+    } else if (..(input$color_var) == "None" || num_colors > 30) {
+      p <- p + geom_point(size  = ..(input$point_size),
+                          color = ..(input$plot_color),
+                          shape = ..(as.numeric(input$point_shape)),
+                          alpha = ..(input$plot_alpha))
     } else {
-      if(input$color_var == "None" || num_colors >30){
-        p <- p + geom_point(size = ..(input$point_size),
-                            color = ..(input$plot_color),
-                            shape = ..(as.numeric(input$point_shape)),
-                            alpha = ..(input$plot_alpha))
-      } else{
-        p <- p + geom_point(aes(color = .data[[input$color_var]]),
-                            size = ..(input$point_size),
-                            shape = ..(as.numeric(input$point_shape)),
-                            alpha = ..(input$plot_alpha))
-        if(length(unique(df[[input$color_var]])) >30){
-          p <- p + theme(legend.position = "none")
-        }
-      }
+      p <- p + geom_point(aes(color = .data[[..(input$color_var)]]),
+                          size  = ..(input$point_size),
+                          shape = ..(as.numeric(input$point_shape)),
+                          alpha = ..(input$plot_alpha))
     }
-    #assigning colors
-    show_color_legend <- input$color_var != "None" && !input$use_hex && length(unique(df[[input$color_var]])) <= 30
-    color_label <- if(show_color_legend) input$color_var else NULL
-    p <- p + labs(title = paste("Scatterplot of", input$x_var, "vs", input$y_var),
-                  x = input$x_var,
-                  y = input$y_var,
-                  color = color_label)
-    if(input$trendline) p <- p + geom_smooth(aes(group = 1), method = "lm", color = "blue")
-    apply_theme(p, input$theme)
+    
+    color_label <- if (..(input$color_var) != "None" && !..(input$use_hex) && num_colors <= 30)
+      ..(input$color_var) else NULL
+    
+    p <- p + labs(
+      title = paste("Scatterplot of", ..(input$x_var), "vs", ..(input$y_var)),
+      x     = ..(input$x_var),
+      y     = ..(input$y_var),
+      color = color_label
+    )
+    if (..(input$trendline)) p <- p + geom_smooth(aes(group = 1), method = "lm", color = "blue")
+    apply_theme(p, ..(input$theme))
   })
-  #output scatterplot
-  output$myPlot <- renderPlotly({p <- scatter_obj()
-  ggplotly(p) %>%
-    layout(hovermode = "closest")})
   
-  #download scatterplot
+  output$myPlot <- renderPlotly({
+    ggplotly(scatter_obj()) %>% layout(hovermode = "closest")
+  })
   output$downloadScatter <- downloadHandler(
-    filename = function() { paste0("scatter-", Sys.Date(), ".png") },
-    content = function(file) { ggsave(file, plot = scatter_obj(), device = "png", width = 8, height = 6) }
+    filename = function() paste0("scatter-", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = scatter_obj(), device = "png", width = 8, height = 6)
   )
-  #creating the scatterplot that is static for large dataset
+  
+  # ---- 9. Static scatter --------------------------------
   static_scatter_obj <- metaReactive({
     df <- cleanedData()
     req(df, input$x_var, input$y_var)
     validate(
       need(is.numeric(df[[input$x_var]]) || inherits(df[[input$x_var]], "Date"),
-           "Please select a Numeric or Date Column for the X-Axis."),
-      need(is.numeric(df[[input$y_var]]),
-           "Please select a Numeric Column for the Y-Axis.")
+           "X-Axis must be numeric or a date."),
+      need(is.numeric(df[[input$y_var]]), "Y-Axis must be numeric.")
     )
-    #data parsing
-    if(is.character(df[[input$x_var]])){
-      test_val <- head(df[[input$x_var]], 20)
-      parsed_test <- suppressWarnings(
-        lubridate:: parse_date_time(test_val, orders = c("ymd", "mdy", "dmy"),quiet = TRUE)
-      )
-      if(any(!is.na(parsed_test))){
-        df[[input$x_var]] <- as.Date(suppressWarnings(
-          lubridate:: parse_date_time(df[[input$x_var]], orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
-        ))
-      }
-    }
-    num_colors <- if(!is.null(input$color_var) && input$color_var != "None") length(unique(df[[input$color_var]])) else 0
-    p <- ggplot(df, aes(x = .data[[input$x_var]], y = .data[[input$y_var]]))
-    if(input$color_var=="None" || num_colors >30){
-      p <- p + geom_point(size = ..(input$point_size),
+    df <- maybe_parse_x(df, ..(input$x_var))
+    
+    num_colors <- if (!is.null(..(input$color_var)) && ..(input$color_var) != "None")
+      length(unique(df[[..(input$color_var)]])) else 0
+    
+    p <- ggplot(df, aes(x = .data[[..(input$x_var)]], y = .data[[..(input$y_var)]]))
+    
+    if (..(input$color_var) == "None" || num_colors > 30) {
+      p <- p + geom_point(size  = ..(input$point_size),
                           color = ..(input$plot_color),
                           shape = ..(as.numeric(input$point_shape)),
                           alpha = ..(input$plot_alpha))
     } else {
-      p <- p + geom_point(aes(color = .data[[input$color_var]]),
-                          size = input$point_size,
-                          shape = as.numeric(input$point_shape),
-                          alpha = input$plot_alpha)
+      p <- p + geom_point(aes(color = .data[[..(input$color_var)]]),
+                          size  = ..(input$point_size),
+                          shape = ..(as.numeric(input$point_shape)),
+                          alpha = ..(input$plot_alpha))
     }
-    show_color_legend <- input$color_var != "None" && num_colors <=30
-    color_label <- if(show_color_legend) input$color_var else NULL
     
-    p <- p + labs(title = paste("Static Scatterplot of", input$x_var, "vs", input$y_var),
-                  x = input$x_var,
-                  y = input$y_var,
-                  color = color_label)
-    if(input$trendline) p <- p + geom_smooth(aes(group = 1), method = "lm", color = "blue")
-    apply_theme(p, input$theme)
+    color_label <- if (..(input$color_var) != "None" && num_colors <= 30)
+      ..(input$color_var) else NULL
+    
+    p <- p + labs(
+      title = paste("Static Scatterplot of", ..(input$x_var), "vs", ..(input$y_var)),
+      x     = ..(input$x_var),
+      y     = ..(input$y_var),
+      color = color_label
+    )
+    if (..(input$trendline)) p <- p + geom_smooth(aes(group = 1), method = "lm", color = "blue")
+    apply_theme(p, ..(input$theme))
   })
-  #output static scatterplot
-  output$myStaticPlot <- renderPlot({
-    static_scatter_obj()
-  })
-  #download static scatter
+  
+  output$myStaticPlot <- renderPlot({ static_scatter_obj() })
   output$downloadStaticScatter <- downloadHandler(
-    filename = function(){ paste0("static-scatter-", Sys.Date(), ".png")},
-    content = function(file){ggsave(file, plot = static_scatter_obj(), device = "png", width = 8, height = 6)}
+    filename = function() paste0("static-scatter-", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = static_scatter_obj(), device = "png", width = 8, height = 6)
   )
-  # creating the histogram
+  
+  # ---- 10. Histogram ------------------------------------
   hist_obj <- metaReactive({
     df <- cleanedData()
-    req(df, input$hist_var)
-    req(input$hist_var %in% names(df))
-    validate(
-      need(is.numeric(df[[input$hist_var]]),
-           "The selected column is not numeric. Please select a numeric variable to continue.")
-    )
-    p <- ggplot(df, aes(x = .data[[input$hist_var]])) + 
+    req(df, input$hist_var, input$hist_var %in% names(df))
+    validate(need(is.numeric(df[[input$hist_var]]),
+                  "Please select a numeric variable for the histogram."))
+    p <- ggplot(df, aes(x = .data[[..(input$hist_var)]])) +
       geom_histogram(fill = ..(input$plot_color), color = "white", bins = ..(input$bins)) +
-      labs(title = paste("Distribution of", input$x_var))
-    apply_theme(p, input$theme)
+      labs(title = paste("Distribution of", ..(input$hist_var)),
+           x = ..(input$hist_var), y = "Count")
+    apply_theme(p, ..(input$theme))
   })
-  #output the histogram
-  output$myHist <- renderPlotly({
-    p <- hist_obj()
-    ggplotly(p)
-  })
-  #download histogram
+  
+  output$myHist <- renderPlotly({ ggplotly(hist_obj()) })
   output$downloadHist <- downloadHandler(
-    filename = function() { paste0("histogram-", Sys.Date(), ".png") },
-    content = function(file) { ggsave(file, plot = hist_obj(), device = "png") }
+    filename = function() paste0("histogram-", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = hist_obj(), device = "png")
   )
-  #creating the boxplot
+  
+  # ---- 11. Box plot -------------------------------------
   box_obj <- metaReactive({
     df <- cleanedData()
     req(df, input$x_var, input$y_var)
-    validate(need(is.numeric(df[[input$y_var]]),
-                  "Boxplot requires a Numeric Column for the Y-Axis values")
-             )
-    # Calculate how many unique categories are in the X variable
-    num_categories <- length(unique(df[[input$x_var]]))
-    
-    # pls stop crashing
     validate(
-      need(num_categories <= 50, 
-           paste("Too many categories (", num_categories, 
-                 ") to display in a boxplot. Please select a column with fewer unique groups."))
+      need(is.numeric(df[[input$y_var]]),
+           "Boxplot requires a numeric Y-axis column."),
+      need(length(unique(df[[input$x_var]])) <= 50,
+           paste0("Too many categories (", length(unique(df[[input$x_var]])),
+                  "). Select a column with ≤ 50 unique groups."))
     )
-    
-    p <- ggplot(df, aes(x = as.factor(.data[[input$x_var]]), y = .data[[input$y_var]])) +
-      geom_boxplot(fill = ..(input$plot_color), alpha = ..(input$plot_alpha), outlier.shape = NA) +
-      labs(title = paste("Boxplot of", input$y_var, "by", input$x_var), 
-           x = input$x_var, 
-           y = input$y_var)
-    
-    apply_theme(p, input$theme)
+    p <- ggplot(df, aes(x = as.factor(.data[[..(input$x_var)]]),
+                        y = .data[[..(input$y_var)]])) +
+      geom_boxplot(fill         = ..(input$plot_color),
+                   alpha        = ..(input$plot_alpha),
+                   outlier.shape = NA) +
+      labs(title = paste("Boxplot of", ..(input$y_var), "by", ..(input$x_var)),
+           x = ..(input$x_var),
+           y = ..(input$y_var))
+    apply_theme(p, ..(input$theme))
   })
-  #output the boxplot
-  output$myBox <- renderPlotly({
-    p <- box_obj()
-    ggplotly(p)
-  })
-  #download boxplot
+  
+  output$myBox <- renderPlotly({ ggplotly(box_obj()) })
   output$downloadBox <- downloadHandler(
-    filename = function() { paste0("boxplot-", Sys.Date(), ".png")},
-    content = function(file) {ggsave(file, plot = box_obj(), device = "png")}
+    filename = function() paste0("boxplot-", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = box_obj(), device = "png")
   )
-  # creating the time trend
-  processedData <- metaReactive({
+  
+  # ---- 12. Time trend -----------------------------------
+  # Deduplicated: single reactive parses dates once
+  processedData <- reactive({
     df <- cleanedData()
     req(df)
-    
-    # 1. Identify potential date columns strictly
-    is_date_col <- sapply(df, function(x) {
-      # Skip if it's already a date, numeric, or logical
-      if (inherits(x, "Date") || inherits(x, "POSIXt")) return(TRUE)
-      if (is.numeric(x) || is.logical(x) || all(is.na(x))) return(FALSE)
-      
-      # Try parsing a small sample silently
-      sample_val <- as.character(head(x[!is.na(x)], 20))
-      if (length(sample_val) == 0) return(FALSE)
-      
-      # Use suppressWarnings to stop the "All formats failed" message from crashing the log
-      test_parse <- suppressWarnings(
-        lubridate::parse_date_time(sample_val, orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
-      )
-      
-      # If we successfully parsed more than 0 rows, it's a date candidate
-      sum(!is.na(test_parse)) > 0
-    })
-    
-    date_col <- names(df)[is_date_col][1]
-    
-    # 2. Stop if no date column is found
-    validate(
-      need(!is.na(date_col), "Could not find a Date column. Please ensure your data has a column like '2023-01-01' or '01/01/2023'.")
-    )
-    
-    # 3. Convert only the detected column
-    df[[date_col]] <- as.Date(suppressWarnings(
-      lubridate::parse_date_time(df[[date_col]], orders = c("ymd", "mdy", "dmy"), quiet = TRUE)
-    ))
-    
-    df
+    try_parse_dates(df)
   })
   
   trend_obj <- metaReactive({
-    df <- processedData()
-    d_col <- names(df)[sapply(df, function(x) inherits(x, "Date"))][1]
-    n_col <- input$y_var # Using the user-selected Y variable
-    req(d_col, n_col)
+    df    <- processedData()
+    d_col <- names(df)[sapply(df, function(x) inherits(x, c("Date", "POSIXt")))][1]
+    n_col <- ..(input$y_var)
     validate(
-      need(inherits(df[[d_col]], "Date") || inherits(df[[df_col]], "POSIXt"),
-           "No valid Date Column detected in the dataset. Time trend cannot be drawn without this."),
+      need(!is.na(d_col),
+           "No date column detected. Ensure your data has a column like '2023-01-01'."),
       need(is.numeric(df[[n_col]]),
-           "Please select a Numeric column for the Y-Axis to see its trend over time.")
+           "Select a numeric column for the Y-axis to plot the time trend.")
     )
-    
     p <- ggplot(df, aes(x = .data[[d_col]], y = .data[[n_col]])) +
-      geom_line(color = ..(input$plot_color), size = ..(input$point_size), alpha = ..(input$plot_alpha)) +
+      geom_line(color = ..(input$plot_color),
+                linewidth = ..(input$point_size) / 4,
+                alpha = ..(input$plot_alpha)) +
       labs(title = "Time Trend Analysis", x = d_col, y = n_col)
-    if(input$trendline) p <- p + geom_smooth(method = "lm", linetype = "dashed")
-    apply_theme(p, input$theme)
+    if (..(input$trendline)) p <- p + geom_smooth(method = "lm", linetype = "dashed")
+    apply_theme(p, ..(input$theme))
   })
-  #output time trend
-  output$timeTrend <- renderPlotly({
-    p <- trend_obj()
-    ggplotly(p)
-  })
-  #download time trend
+  
+  output$timeTrend <- renderPlotly({ ggplotly(trend_obj()) })
   output$downloadTrend <- downloadHandler(
-    filename = function() { paste0("trend-", Sys.Date(), ".png") },
-    content = function(file) { ggsave(file, plot = trend_obj(), device = "png") }
+    filename = function() paste0("trend-", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = trend_obj(), device = "png")
   )
   
-  # creating table
-  output$contents <- renderTable({
-    df <- userData()
-    req(df)
-    if(input$disp == "head") {
-      return(head(df))
-    } else {
-      # Never try to render more than 100 rows in a standard table
-      # Standard render Table is not built for all in large data
-      return(head(df, 100)) 
-    }
-  })
-  #download table
-  output$downloadData <- downloadHandler(
-    filename = function() { paste0("data-", Sys.Date(), ".csv") },
-    content = function(file) { write.csv(userData(), file, row.names = FALSE) }
-  )
-  
-  # table code buttons
+  # ---- 13. Code display buttons -------------------------
   observeEvent(input$showCodePlot, {
-    output$plotCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), scatter_obj()) })
+    output$plotCodeDisplay <- renderPrint({
+      expandChain(quote(library(ggplot2)), scatter_obj())
+    })
   })
   observeEvent(input$showCodeStaticPlot, {
     output$staticPlotCodeDisplay <- renderPrint({
@@ -652,14 +618,20 @@ server <- function(input, output, session) {
     })
   })
   observeEvent(input$showCodeHist, {
-    output$histCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), hist_obj()) })
+    output$histCodeDisplay <- renderPrint({
+      expandChain(quote(library(ggplot2)), hist_obj())
+    })
   })
   observeEvent(input$showCodeBox, {
-    output$boxCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), box_obj())})
+    output$boxCodeDisplay <- renderPrint({
+      expandChain(quote(library(ggplot2)), box_obj())
+    })
   })
   observeEvent(input$showCodeTrend, {
-    output$trendCodeDisplay <- renderPrint({ expandChain(quote(library(ggplot2)), trend_obj()) })
+    output$trendCodeDisplay <- renderPrint({
+      expandChain(quote(library(ggplot2)), trend_obj())
+    })
   })
 }
-  # Create Shiny app 
-  shinyApp(ui, server)
+
+shinyApp(ui, server)
